@@ -1,0 +1,41 @@
+{
+  "name": "@hiddenmanifest/railgun-defi-adapters",
+  "version": "0.1.0",
+  "description": "Auditable DeFi adapter call planners for RAILGUN cross-contract private transactions.",
+  "type": "module",
+  "license": "MIT",
+  "sideEffects": false,
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./zero-x": {
+      "types": "./dist/adapters/zero-x/index.d.ts",
+      "default": "./dist/adapters/zero-x/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsc -p tsconfig.json && node --test test/*.test.mjs",
+    "check": "tsc -p tsconfig.json --noEmit"
+  },
+  "keywords": [
+    "railgun",
+    "0x",
+    "swap",
+    "adapters",
+    "privacy",
+    "defi"
+  ],
+  "devDependencies": {
+    "typescript": "^5.9.0"
+  }
+}
