@@ -50,7 +50,8 @@ const plan = await buildZeroXPrivateSwapPlan({
 });
 ```
 
-Pass `plan.unshieldERC20Amounts`, `plan.shieldERC20Recipients`,
+Pass `plan.unshieldERC20Amounts`, `plan.unshieldERC721Amounts`,
+`plan.shieldERC20Recipients`, `plan.shieldERC721Recipients`,
 `plan.crossContractCalls`, and `plan.minGasLimit` into the RAILGUN Wallet SDK
 cross-contract proof/populate functions.
 
@@ -59,6 +60,56 @@ the installed RAILGUN SDK or local address parser before building a funds-flow
 plan. `trustedTransactionTargets` and `trustedAllowanceSpenders` are also
 optional because 0x targets can vary by chain and API version; pass them when the
 app maintains chain-specific 0x target and spender allowlists.
+
+## Writing an adapter
+
+Every adapter is a pure call planner that returns a `PrivateDefiCallPlan`. The
+0x module is the reference implementation; new adapters follow the same shape so
+they stay small and auditable.
+
+**Module layout** — one adapter per directory: `src/adapters/<name>/index.ts`.
+Re-export it from `src/index.ts` and add a `./<name>` subpath to the
+`package.json` `exports` map.
+
+**Required exports**
+
+- A params type that extends `BasePrivatePlanParams` (`core/types.ts`) with the
+  protocol-specific fields. This gives every adapter the same validated RAILGUN
+  surface: `chainId`, `relayAdaptContract`, `railgunAddress`,
+  `validateRailgunAddress?`, `unshieldFeeBasisPoints`, `fetch?`, `minGasLimit?`,
+  `trustedTransactionTargets?`. Protocol-specific trust inputs, such as 0x
+  allowance spender allowlists, belong on the adapter params type rather than the
+  base params.
+- An async entry function satisfying
+  `PrivateDefiPlanBuilder<Params, Metadata>` — i.e. `(params) => Promise<PrivateDefiCallPlan<Metadata>>`.
+  Specialize the plan's `metadata` by extending `BasePlanMetadata`
+  (`{ quoteId?, route? }`), as `PrivateSwapPlanMetadata` does.
+- The URL builder and the fetch helper as separate exported functions so tests
+  can inject a mock `fetch` and assert request shape independently.
+
+**Shared core helpers** (`core/encoding.ts`) — reuse these rather than
+re-implementing per adapter:
+
+- `assertChainId`, `assertBasisPoints` — input range checks.
+- `assertRailgunRecipient` — non-blank railgun address + optional validator.
+- `calculatePostUnshieldAmount` — apply the unshield fee before quoting/approving.
+- `assertActionTransaction` — structural check of an upstream call (`to`/`data`/
+  optional zero `value`).
+- `assertTrustedAddress` — optional allowlist membership with a caller-supplied
+  message.
+- `buildApproveCall` — construct an exact ERC20 approval `CrossContractCall`.
+- `buildERC20ShieldRecipients`, `buildERC721ShieldRecipients` — construct
+  deduped shield-back recipient lists for the plan's asset legs.
+- `fetchAdapterJson` — GET + JSON with the upstream error body redacted (only the
+  status is surfaced).
+
+**The canonical lifecycle**: build request URL → `fetchAdapterJson` → validate
+the response (token/amount match, `assertActionTransaction`, allowlists) →
+assemble ERC20/ERC721 unshield amounts, any approval calls, the action calls,
+and complete ERC20/ERC721 shield recipient lists into a `PrivateDefiCallPlan`.
+
+**Tests** — add `test/<name>.test.mjs` running against `dist` with an injected
+`fetch` fixture, mirroring `test/zero-x.test.mjs`.
 
 ## References
 

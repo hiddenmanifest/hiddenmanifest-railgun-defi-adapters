@@ -1,12 +1,19 @@
 import {
+  assertActionTransaction,
+  assertBasisPoints,
+  assertChainId,
   assertEVMAddress,
-  assertHexString,
+  assertRailgunRecipient,
+  assertTrustedAddress,
+  buildApproveCall,
+  buildERC20ShieldRecipients,
   calculatePostUnshieldAmount,
-  encodeERC20Approve,
+  fetchAdapterJson,
   sameAddress
 } from '../../core/encoding.js';
 import type {
   AdapterFetch,
+  BasePrivatePlanParams,
   CrossContractCall,
   ERC20Token,
   EVMAddress,
@@ -71,23 +78,15 @@ export type ZeroXQuoteResponse = {
   route?: unknown;
 };
 
-export type BuildZeroXPrivateSwapPlanParams = {
-  chainId: number;
-  relayAdaptContract: EVMAddress;
-  railgunAddress: string;
-  validateRailgunAddress?: (railgunAddress: string) => boolean;
+export type BuildZeroXPrivateSwapPlanParams = BasePrivatePlanParams & {
   sellToken: ERC20Token;
   buyToken: ERC20Token;
   sellAmount: bigint;
   slippageBps: number;
   zeroXApiKey: string;
-  unshieldFeeBasisPoints: number;
-  fetch?: AdapterFetch;
   txOrigin?: EVMAddress;
   excludedSources?: string;
   affiliateFee?: ZeroXAffiliateFee;
-  minGasLimit?: bigint;
-  trustedTransactionTargets?: EVMAddress[];
   trustedAllowanceSpenders?: EVMAddress[];
 };
 
@@ -96,12 +95,8 @@ export function buildZeroXAllowanceHolderQuoteUrl(params: BuildZeroXQuoteUrlPara
   assertEVMAddress(params.sellToken.address, 'sellToken.address');
   assertEVMAddress(params.buyToken.address, 'buyToken.address');
 
-  if (!Number.isInteger(params.chainId) || params.chainId <= 0) {
-    throw new Error('chainId must be a positive integer');
-  }
-  if (!Number.isInteger(params.slippageBps) || params.slippageBps < 0 || params.slippageBps > 10_000) {
-    throw new Error('slippageBps must be an integer from 0 to 10000');
-  }
+  assertChainId(params.chainId);
+  assertBasisPoints(params.slippageBps, 'slippageBps');
   if (params.sellAmount <= 0n) {
     throw new Error('quote sellAmount must be greater than zero');
   }
@@ -123,13 +118,7 @@ export function buildZeroXAllowanceHolderQuoteUrl(params: BuildZeroXQuoteUrlPara
 
   if (params.affiliateFee) {
     assertEVMAddress(params.affiliateFee.recipient, 'affiliateFee.recipient');
-    if (
-      !Number.isInteger(params.affiliateFee.bps) ||
-      params.affiliateFee.bps < 0 ||
-      params.affiliateFee.bps > 1_000
-    ) {
-      throw new Error('affiliateFee.bps must be an integer from 0 to 1000');
-    }
+    assertBasisPoints(params.affiliateFee.bps, 'affiliateFee.bps', 1_000);
     url.searchParams.set('swapFeeRecipient', params.affiliateFee.recipient);
     url.searchParams.set('swapFeeBps', params.affiliateFee.bps.toString());
     url.searchParams.set(
@@ -149,25 +138,16 @@ export async function fetchZeroXAllowanceHolderQuote(
   if (!apiKey) {
     throw new Error('zeroXApiKey is required');
   }
-  if (!fetchImpl) {
-    throw new Error('fetch implementation is required');
-  }
 
-  const response = await fetchImpl(url, {
-    method: 'GET',
+  return fetchAdapterJson<ZeroXQuoteResponse>(url, {
+    fetch: fetchImpl,
     headers: {
       '0x-api-key': apiKey,
       '0x-version': ZEROX_API_VERSION,
       'Content-Type': 'application/json'
-    }
+    },
+    errorPrefix: '0x quote request failed'
   });
-
-  if (!response.ok) {
-    await response.text().catch(() => '');
-    throw new Error(`0x quote request failed (${response.status})`);
-  }
-
-  return (await response.json()) as ZeroXQuoteResponse;
 }
 
 export async function buildZeroXPrivateSwapPlan(
@@ -179,15 +159,7 @@ export async function buildZeroXPrivateSwapPlan(
   if (sameAddress(params.sellToken.address, params.buyToken.address)) {
     throw new Error('sellToken and buyToken must be different');
   }
-  if (!params.railgunAddress.trim()) {
-    throw new Error('railgunAddress is required');
-  }
-  if (
-    params.validateRailgunAddress &&
-    !params.validateRailgunAddress(params.railgunAddress)
-  ) {
-    throw new Error('railgunAddress failed validation');
-  }
+  assertRailgunRecipient(params.railgunAddress, params.validateRailgunAddress);
 
   const swapSellAmount = calculatePostUnshieldAmount(
     params.sellAmount,
@@ -227,11 +199,7 @@ export async function buildZeroXPrivateSwapPlan(
   }
   const spender = validateZeroXQuote(quoteValidationParams);
 
-  const approveCall: CrossContractCall = {
-    to: params.sellToken.address,
-    data: encodeERC20Approve(spender, swapSellAmount),
-    value: 0n
-  };
+  const approveCall = buildApproveCall(params.sellToken.address, spender, swapSellAmount);
   const swapCall: CrossContractCall = {
     to: quote.transaction.to as EVMAddress,
     data: quote.transaction.data as HexString,
@@ -260,16 +228,12 @@ export async function buildZeroXPrivateSwapPlan(
         amount: params.sellAmount
       }
     ],
-    shieldERC20Recipients: [
-      {
-        tokenAddress: params.sellToken.address,
-        recipientAddress: params.railgunAddress
-      },
-      {
-        tokenAddress: params.buyToken.address,
-        recipientAddress: params.railgunAddress
-      }
-    ],
+    unshieldERC721Amounts: [],
+    shieldERC20Recipients: buildERC20ShieldRecipients(
+      [params.sellToken.address, params.buyToken.address],
+      params.railgunAddress
+    ),
+    shieldERC721Recipients: [],
     crossContractCalls: [approveCall, swapCall],
     minGasLimit: params.minGasLimit ?? DEFAULT_MIN_GAS_LIMIT,
     metadata
@@ -311,29 +275,31 @@ function validateZeroXQuote(params: {
     throw new Error(`0x quote contains invalid excluded sources: ${quote.issues?.invalidSourcesPassed?.join(', ')}`);
   }
 
-  assertEVMAddress(quote.transaction.to, '0x transaction.to');
-  if (
-    trustedTransactionTargets &&
-    !trustedTransactionTargets.some((target) => sameAddress(target, quote.transaction.to))
-  ) {
-    throw new Error('0x transaction.to is not in trustedTransactionTargets');
-  }
-  assertHexString(quote.transaction.data, '0x transaction.data');
-  if (quote.transaction.data === '0x') {
-    throw new Error('0x transaction.data cannot be empty');
-  }
-  if (BigInt(quote.transaction.value || '0') !== 0n) {
-    throw new Error('0x transaction.value must be zero for ERC20-to-ERC20 private swaps');
-  }
+  assertActionTransaction(
+    {
+      to: quote.transaction.to,
+      data: quote.transaction.data,
+      value: BigInt(quote.transaction.value || '0')
+    },
+    {
+      label: '0x transaction',
+      requireZeroValue: true,
+      zeroValueErrorMessage: '0x transaction.value must be zero for ERC20-to-ERC20 private swaps'
+    }
+  );
+  assertTrustedAddress(
+    quote.transaction.to,
+    trustedTransactionTargets,
+    '0x transaction.to is not in trustedTransactionTargets'
+  );
 
   const spender =
     quote.issues?.allowance?.spender ?? quote.allowanceTarget ?? ZEROX_ALLOWANCE_HOLDER_ADDRESS;
   assertEVMAddress(spender, '0x allowance spender');
-  if (
-    trustedAllowanceSpenders &&
-    !trustedAllowanceSpenders.some((trustedSpender) => sameAddress(trustedSpender, spender))
-  ) {
-    throw new Error('0x allowance spender is not in trustedAllowanceSpenders');
-  }
+  assertTrustedAddress(
+    spender,
+    trustedAllowanceSpenders,
+    '0x allowance spender is not in trustedAllowanceSpenders'
+  );
   return spender;
 }

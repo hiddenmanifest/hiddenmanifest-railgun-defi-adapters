@@ -97,6 +97,7 @@ test('builds direct Railgun cross-contract call plan from a 0x quote', async () 
 
   assert.equal(fetchCalls.length, 1);
   assert.equal(plan.unshieldERC20Amounts[0].amount, 1_000_000n);
+  assert.deepEqual(plan.unshieldERC721Amounts, []);
   assert.equal(plan.metadata.swapSellAmount, 997_500n);
   assert.deepEqual(
     plan.shieldERC20Recipients.map((recipient) => recipient.tokenAddress),
@@ -104,6 +105,7 @@ test('builds direct Railgun cross-contract call plan from a 0x quote', async () 
   );
   assert.equal(plan.shieldERC20Recipients[0].recipientAddress, railgunAddress);
   assert.equal(plan.shieldERC20Recipients[1].recipientAddress, railgunAddress);
+  assert.deepEqual(plan.shieldERC721Recipients, []);
   assert.equal(plan.crossContractCalls[0].to, usdc.address);
   assert.equal(plan.crossContractCalls[0].value, 0n);
   assert.equal(plan.crossContractCalls[1].data, '0x2213bc0b');
